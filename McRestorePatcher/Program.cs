@@ -16,14 +16,33 @@ using dnlib.DotNet.Writer;
 // stub 常量）、锚点失效时退回结构特征扫描；每处补丁自带幂等检查，重复运行不会
 // 二次修改。任一必需补丁无法应用时拒绝写出输出文件（返回 1）。
 
+// 交互模式：双击运行，把 PCL 的 exe 拖进控制台窗口（文件路径会被粘贴进来）后回车。
+var interactive = false;
+if (args.Length == 0)
+{
+    var prompted = AskInputAndOutput();
+    if (prompted == null) return 0;
+    args = new[] { prompted.Value.input, prompted.Value.output };
+    interactive = true;
+}
+else if (args.Length == 1 && !args[0].StartsWith("--", StringComparison.Ordinal))
+{
+    var prompted = NormalizeInput(args[0]);
+    if (prompted == null) return 0;
+    args = new[] { prompted.Value.input, prompted.Value.output };
+    interactive = true;
+}
+
 var mode = args.Length > 0 ? args[0] : "";
-if (args.Length == 0 || mode == "--help" || mode == "-h" || mode == "/?")
+if (mode == "--help" || mode == "-h" || mode == "/?")
 {
     Console.WriteLine("用法:");
     Console.WriteLine("  McRestorePatcher <官方 exe> <输出 exe>");
     Console.WriteLine("  McRestorePatcher --dump <exe> <类型全名> <方法名>");
     Console.WriteLine("  McRestorePatcher --refs <exe> <子串>");
     Console.WriteLine("  McRestorePatcher --strings <exe> <正则>");
+    Console.WriteLine();
+    Console.WriteLine("也可以不带参数运行，按提示把 PCL 的 exe 拖进窗口。");
     return 0;
 }
 
@@ -98,10 +117,10 @@ var skipFilter = Environment.GetEnvironmentVariable("MCR_SKIP");
 void Run(string name, Func<ModuleDefMD, Outcome> patch, bool required)
 {
     if (!string.IsNullOrWhiteSpace(onlyFilter)
-        && !onlyFilter.Split(',').Any(t => name.Contains(t.Trim(), StringComparison.OrdinalIgnoreCase)))
+        && !onlyFilter.Split(',').Any(t => name.IndexOf(t.Trim(), StringComparison.OrdinalIgnoreCase) >= 0))
         return;
     if (!string.IsNullOrWhiteSpace(skipFilter)
-        && skipFilter.Split(',').Any(t => name.Contains(t.Trim(), StringComparison.OrdinalIgnoreCase)))
+        && skipFilter.Split(',').Any(t => name.IndexOf(t.Trim(), StringComparison.OrdinalIgnoreCase) >= 0))
         return;
     Outcome o;
     try { o = patch(module); }
@@ -143,13 +162,64 @@ foreach (var o in results)
 if (fail)
 {
     Console.Error.WriteLine("补丁失败：该版本可能不兼容，未写出输出文件。");
+    if (interactive) PauseBeforeExit();
     return 1;
 }
 
 var opts = new ModuleWriterOptions(module) { Logger = DummyLogger.NoThrowInstance };
 module.Write(args[1], opts);
 Console.WriteLine("完成，已写出: " + args[1]);
+if (interactive)
+{
+    Console.WriteLine();
+    Console.WriteLine("用输出文件替换原来的 PCL 启动器即可（原文件建议先备份）。");
+    PauseBeforeExit();
+}
 return 0;
+
+// =====================================================================
+// 交互模式辅助
+// =====================================================================
+
+(string input, string output)? NormalizeInput(string raw)
+{
+    var p = raw.Trim().Trim('"');
+    if (p.Length == 0) return null;
+    if (Directory.Exists(p)) p = Path.Combine(p, "Plain Craft Launcher 2.exe");
+    if (!File.Exists(p)) { Console.Error.WriteLine("文件不存在: " + p); return null; }
+    var full = Path.GetFullPath(p);
+    var dir = Path.GetDirectoryName(full);
+    var name = Path.GetFileNameWithoutExtension(full);
+    if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name)) return null;
+    var output = Path.Combine(dir, name + " (dl-restore).exe");
+    return (full, output);
+}
+
+(string input, string output)? AskInputAndOutput()
+{
+    Console.Title = "PCL 下载恢复补丁工具";
+    Console.WriteLine("PCL 下载恢复补丁工具");
+    Console.WriteLine("================================");
+    Console.WriteLine("把 PCL 的 exe 拖进这个窗口（路径会自动粘贴），然后按回车。");
+    Console.WriteLine("也可以直接输入 exe 或它所在文件夹的路径。");
+    Console.WriteLine();
+    while (true)
+    {
+        Console.Write("PCL exe 路径: ");
+        var raw = Console.ReadLine();
+        if (raw == null || raw.Trim().Length == 0) return null;
+        var r = NormalizeInput(raw);
+        if (r != null) return r;
+        Console.WriteLine("没有找到文件，请重试（直接回车退出）。");
+    }
+}
+
+void PauseBeforeExit()
+{
+    Console.WriteLine();
+    Console.WriteLine("按任意键退出...");
+    try { Console.ReadKey(true); } catch { }
+}
 
 // =====================================================================
 // 补丁实现（全部高容错：忽略 nop、宽松常量/指令形态、结构回退）
