@@ -92,6 +92,28 @@ jobs:
           Compress-Archive -Path "$root\*" -DestinationPath $zip -Force
           "PKG_ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
 
+          # 补丁工具包，方便用户对任意官方版本自行打补丁
+          $tool = "$env:RUNNER_TEMP\tool"
+          New-Item -ItemType Directory $tool -Force | Out-Null
+          $bin = "McRestorePatcher/bin/Release/net8.0"
+          Copy-Item "$bin\McRestorePatcher.exe","$bin\McRestorePatcher.dll","$bin\dnlib.dll","$bin\McRestorePatcher.deps.json","$bin\McRestorePatcher.runtimeconfig.json" $tool
+          Copy-Item "McRestorePatcher/Program.cs","McRestorePatcher/McRestorePatcher.csproj" $tool
+          $toolReadme = @"
+          McRestorePatcher —— PCL 下载恢复补丁工具
+
+          用法：
+            1. 准备官方 PCL 2.99.0.x 正式版 exe
+            2. McRestorePatcher.exe "<原版 exe>" "<输出 exe>"
+               或 dotnet McRestorePatcher.dll "<原版 exe>" "<输出 exe>"
+            3. 用输出 exe 替换启动器（替换前备份）
+
+          注意：需要 .NET 8 运行时；补丁失败会返回非 0 且不产出文件。
+          "@
+          $toolReadme | Set-Content -Encoding UTF8 "$tool\使用说明.txt"
+          $toolZip = "$env:RUNNER_TEMP\McRestorePatcher.zip"
+          Compress-Archive -Path "$tool\*" -DestinationPath $toolZip -Force
+          "TOOL_ZIP=$toolZip" | Out-File -Append $env:GITHUB_ENV
+
       - name: 发布 Release
         if: env.SKIP == 'false'
         shell: pwsh
@@ -106,6 +128,7 @@ jobs:
 
           - `Plain Craft Launcher 2.exe`：直接替换官方 exe（替换前先备份）
           - `PCL_$($env:PCL_VERSION)_MCfix.zip`：带 Setup.ini（已关闭更新提示）的便携包
+          - `McRestorePatcher.zip`：补丁工具，可对任意官方 2.99.0.x 自行打补丁
 
           恢复的入口：下载页「原版」、整合包安装、修改页「MC 版本」、资源页「安装整合包」、启动页下载状态、更新提示弹窗按钮。
 
@@ -115,6 +138,7 @@ jobs:
           gh release create "v$env:PCL_VERSION" `
             "$env:PATCHED_EXE" `
             "$env:PKG_ZIP" `
+            "$env:TOOL_ZIP" `
             --repo $env:GITHUB_REPOSITORY `
             --title "PCL $env:PCL_VERSION 下载恢复版" `
             --notes-file "$env:RUNNER_TEMP\notes.md"
