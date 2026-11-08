@@ -46,6 +46,7 @@ jobs:
           } else {
             "SKIP=false" | Out-File -Append $env:GITHUB_ENV
           }
+          exit 0
 
       - name: 构建补丁工具
         if: env.SKIP == 'false'
