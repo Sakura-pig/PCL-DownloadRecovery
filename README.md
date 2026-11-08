@@ -21,6 +21,7 @@ Release 页面提供：
 
 - `Plain Craft Launcher 2.exe`：打好补丁的官方版。替换现有的启动器即可，替换前先备份。
 - `PCL_<版本>_MCfix.zip`：带 `PCL\Setup.ini` 的便携包，解压就能用。
+- `McRestorePatcher.zip`：补丁工具（源码在 `McRestorePatcher/` 目录），可对任意官方 2.99.0.x 自行打补丁。
 
 启动器会检查更新。为防止修复版被自动更新覆盖，包里的 `Setup.ini` 已经写好 `SystemSystemUpdate:3`；如果你用的是自己的数据文件夹，在 `PCL\Setup.ini` 里加一行 `SystemSystemUpdate:3`，或者在设置里把更新改成「关闭更新提示」。
 
