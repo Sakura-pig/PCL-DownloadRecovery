@@ -1,0 +1,129 @@
+name: Auto Patch & Release
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"   # 每天 UTC 03:00 检查官方是否发版
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  patch-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 获取官方最新版
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch --depth 1 https://github.com/Meloong-Git/PCL.git main
+          git checkout FETCH_HEAD -- "最新正式版.zip"
+          if (-not (Test-Path "最新正式版.zip")) { throw "未找到 最新正式版.zip" }
+          Expand-Archive "最新正式版.zip" "$env:RUNNER_TEMP\pcl-official" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\pcl-official" -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "压缩包内没有 exe" }
+          $ver = (Get-Item $exe.FullName).VersionInfo.FileVersion
+          "PCL_VERSION=$ver" | Out-File -Append $env:GITHUB_ENV
+          "OFFICIAL_EXE=$($exe.FullName)" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "官方版本: $ver"
+
+      - name: 已有该版本 Release 则跳过
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view "v$env:PCL_VERSION" --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "已存在 v$env:PCL_VERSION 的 Release，跳过"
+            "SKIP=true" | Out-File -Append $env:GITHUB_ENV
+          } else {
+            "SKIP=false" | Out-File -Append $env:GITHUB_ENV
+          }
+
+      - name: 构建补丁工具
+        if: env.SKIP == 'false'
+        run: dotnet build McRestorePatcher/McRestorePatcher.csproj -c Release
+
+      - name: 打补丁并自检
+        if: env.SKIP == 'false'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = "$env:RUNNER_TEMP\pcl-fixed"
+          New-Item -ItemType Directory $outDir -Force | Out-Null
+          $out = Join-Path $outDir "Plain Craft Launcher 2.exe"
+          $dll = "McRestorePatcher/bin/Release/net8.0/McRestorePatcher.dll"
+          dotnet $dll "$env:OFFICIAL_EXE" $out
+          if ($LASTEXITCODE -ne 0) { throw "补丁失败（退码 $LASTEXITCODE），该版本需要人工适配" }
+          $ver = (Get-Item $out).VersionInfo.FileVersion
+          if ($ver -ne $env:PCL_VERSION) { throw "版本号不一致: $ver" }
+          # 自检：对产物再跑一次，必须全部 SKIP 且退码 0
+          dotnet $dll $out "$env:RUNNER_TEMP\selfcheck.exe"
+          if ($LASTEXITCODE -ne 0) { throw "自检失败，产物可能不可用" }
+          "PATCHED_EXE=$out" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 打包
+        if: env.SKIP == 'false'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = "$env:RUNNER_TEMP\pkg"
+          New-Item -ItemType Directory "$root\PCL" -Force | Out-Null
+          Copy-Item $env:PATCHED_EXE "$root\Plain Craft Launcher 2.exe"
+          "LaunchFolderSelect:$.minecraft\`r`nSystemSystemUpdate:3" | Set-Content -Encoding ASCII "$root\PCL\Setup.ini"
+          $readme = @"
+          PCL $env:PCL_VERSION 下载恢复版
+          ================================
+          版本：$env:PCL_VERSION（官方正式版 + 下载恢复补丁）
+          配置：已关闭更新提示（PCL\Setup.ini 中 SystemSystemUpdate:3）
+
+          使用方法：解压到任意文件夹，双击 "Plain Craft Launcher 2.exe"。
+          "@
+          $readme | Set-Content -Encoding UTF8 "$root\说明.txt"
+          $zip = "$env:RUNNER_TEMP\PCL_$($env:PCL_VERSION)_MCfix.zip"
+          Compress-Archive -Path "$root\*" -DestinationPath $zip -Force
+          "PKG_ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 发布 Release
+        if: env.SKIP == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notes = @"
+          PCL $env:PCL_VERSION 正式版的下载恢复版。
+
+          基于官方发布版，只恢复被合规裁剪掉的 MC 下载入口，其余内容与原版一致。
+
+          - `Plain Craft Launcher 2.exe`：直接替换官方 exe（替换前先备份）
+          - `PCL_$($env:PCL_VERSION)_MCfix.zip`：带 Setup.ini（已关闭更新提示）的便携包
+
+          恢复的入口：下载页「原版」、整合包安装、修改页「MC 版本」、资源页「安装整合包」、启动页下载状态、更新提示弹窗按钮。
+
+          注意：改过的 exe 可能被杀软误报；启动器的更新提示已关闭，避免被官方更新覆盖。
+          "@
+          $notes | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\notes.md"
+          gh release create "v$env:PCL_VERSION" `
+            "$env:PATCHED_EXE" `
+            "$env:PKG_ZIP" `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "PCL $env:PCL_VERSION 下载恢复版" `
+            --notes-file "$env:RUNNER_TEMP\notes.md"
+
+      - name: 失败时开 Issue
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $body = "自动流水线对 PCL $env:PCL_VERSION 打补丁失败，需要人工适配补丁工具。`n`n运行记录：$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          gh issue create --repo $env:GITHUB_REPOSITORY --title "补丁失败：PCL $env:PCL_VERSION" --body $body 2>$null | Out-Null
+          exit 0
